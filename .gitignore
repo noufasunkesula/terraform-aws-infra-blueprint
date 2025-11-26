@@ -1,0 +1,56 @@
+# --------------------------
+# Terraform
+# --------------------------
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Local tfvars (NEVER COMMIT SECRETS)
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+
+# Crash logs
+crash.log
+crash.*
+
+# Plan files
+*.plan
+*.binary
+tfplan*
+terraform.tfplan
+
+# --------------------------
+# IDE / Editors
+# --------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --------------------------
+# Logs
+# --------------------------
+*.log
+logs/
+debug.log
+
+# --------------------------
+# OS Files
+# --------------------------
+.DS_Store
+Thumbs.db
+
+# --------------------------
+# Scripts Output
+# --------------------------
+*.out
+*.tmp
+
+# --------------------------
+# Python virtual env (if used)
+# --------------------------
+venv/
+.env/
+.envrc

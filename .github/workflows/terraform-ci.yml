@@ -1,0 +1,199 @@
+name: Enterprise Terraform Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+
+      module:
+        description: "Select module to deploy"
+        required: true
+        type: choice
+        options:
+          - vpc
+          - eks
+          - rds
+          - s3
+          - all
+
+jobs:
+  security-check:
+    name: 🔒 Trivy Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🛎 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Scan Terraform for Misconfigurations
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"   # don't block pipeline unless you want to
+
+      - name: 📢 Send Slack Notification (Scan Complete)
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"🔍 Trivy scan completed for Terraform repo (manual run)."}' \
+          "<SLACK_WEBHOOK_URL>"
+
+  plan:
+    name: 📘 Terraform PLAN
+    runs-on: ubuntu-latest
+    needs: security-check
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      ENV: ${{ github.event.inputs.environment }}
+      MODULE: ${{ github.event.inputs.module }}
+      ROOT_DIR: environments/${{ github.event.inputs.environment }}
+
+    steps:
+      - name: 🛎 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔐 Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-south-1
+          role-to-assume: arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/<GITHUB_OIDC_ROLE>
+
+      - name: 📁 Determine Module Path
+        id: module-path
+        run: |
+          if [ "${MODULE}" = "all" ]; then
+            echo "module_path=${ROOT_DIR}" >> $GITHUB_OUTPUT
+          else
+            echo "module_path=${ROOT_DIR}/${MODULE}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🔧 Terraform Init
+        run: |
+          cd ${{ steps.module-path.outputs.module_path }}
+          terraform init -upgrade
+
+      - name: 🧪 Terraform Validate
+        run: |
+          cd ${{ steps.module-path.outputs.module_path }}
+          terraform validate
+
+      - name: 📘 Terraform Plan
+        run: |
+          cd ${{ steps.module-path.outputs.module_path }}
+          terraform plan -var-file="../terraform.tfvars" -out=tfplan.binary
+
+      - name: 📦 Upload TF Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ env.ENV }}-${{ env.MODULE }}
+          path: ${{ steps.module-path.outputs.module_path }}/tfplan.binary
+
+      - name: 📢 Slack Notification (Plan Complete)
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"📝 Terraform PLAN completed for *${ENV}/${MODULE}*.\"}" \
+          "<SLACK_WEBHOOK_URL>"
+
+  apply:
+    name: 🚀 Terraform APPLY
+    runs-on: ubuntu-latest
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      ENV: ${{ github.event.inputs.environment }}
+      MODULE: ${{ github.event.inputs.module }}
+      ROOT_DIR: environments/${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-south-1
+          role-to-assume: arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/<GITHUB_OIDC_ROLE>
+
+      - name: Download TF Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ env.ENV }}-${{ env.MODULE }}
+
+      - name: Determine Module Path
+        id: module-path
+        run: |
+          if [ "${MODULE}" = "all" ]; then
+            echo "module_path=${ROOT_DIR}" >> $GITHUB_OUTPUT
+          else
+            echo "module_path=${ROOT_DIR}/${MODULE}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Apply Terraform
+        run: |
+          cd ${{ steps.module-path.outputs.module_path }}
+          terraform apply tfplan.binary
+
+      - name: Notify Slack (Apply Success)
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"🎉 *APPLY SUCCESS*: Environment: ${ENV}, Module: ${MODULE}\"}" \
+          "<SLACK_WEBHOOK_URL>"
+
+  drift-detection:
+    name: 🌪️ Drift Detection
+    runs-on: ubuntu-latest
+    needs: apply
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      ENV: ${{ github.event.inputs.environment }}
+      ROOT_DIR: environments/${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-south-1
+          role-to-assume: arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/<GITHUB_OIDC_ROLE>
+
+      - name: Run Drift Detection
+        id: drift
+        run: |
+          cd $ROOT_DIR
+          terraform plan -detailed-exitcode -var-file="terraform.tfvars" || EXIT_CODE=$?
+
+          if [ "$EXIT_CODE" = "2" ]; then
+            echo "drift=true" >> $GITHUB_OUTPUT
+          else
+            echo "drift=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Slack Notification (Drift)
+        if: steps.drift.outputs.drift == 'true'
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"🌪️ *DRIFT DETECTED* in ${ENV}. Manual review required!\"}" \
+          "<SLACK_WEBHOOK_URL>"
